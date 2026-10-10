@@ -2053,9 +2053,30 @@ async def post_webhook_message(
     if not channel:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
 
+##########
+    model_id = request.headers.get("X-Model-Id") or request.headers.get("Model-Id")
+    model_name = None
+    if model_id:
+        user = await Users.get_user_by_id(webhook.user_id, db=db)
+        if not request.app.state.MODELS:
+            await get_all_models(request, user=user)
+        model_item = request.app.state.MODELS.get(model_id)
+        if model_item:
+            model_name = model_item.get("name") or model_item.get("info", {}).get("name")
+
+    if not model_name:
+        model_name = request.headers.get("X-Model-Name") or request.headers.get("Model-Name")
+
+    message_meta = {'webhook': {'id': webhook.id}}
+    if model_id:
+        message_meta['model_id'] = model_id
+    if model_name:
+        message_meta['model_name'] = model_name
+##########
+
     # Create message with webhook identity stored in meta
     message = await Messages.insert_new_message(
-        MessageForm(content=form_data.content, meta={'webhook': {'id': webhook.id}}),
+        MessageForm(content=form_data.content, meta=message_meta),
         webhook.channel_id,
         webhook.user_id,  # Required for DB but webhook info in meta takes precedence
         db=db,
