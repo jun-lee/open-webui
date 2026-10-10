@@ -242,10 +242,13 @@
 
 		const tempId = uuidv4();
 
+		const parentId = reply_to_message?.parent_id ?? reply_to_message?.id ?? null;
+
 		const message = {
 			temp_id: tempId,
 			content: content,
 			data: data,
+			parent_id: parentId,
 			reply_to_id: reply_to_message?.id ?? null
 		};
 
