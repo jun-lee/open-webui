@@ -18,6 +18,7 @@
 	import {
 		createNewModel,
 		deleteAllModels,
+		deleteModelById,
 		getAllModels,
 		getModelById,
 		exportModels,
@@ -97,6 +98,8 @@
 
 	let showManageModal = false;
 	let showResetModal = false;
+	let showDeleteModal = false;
+	let modelToDelete: ModelListItem | null = null;
 	let savingModelOrder = false;
 	let savingModelsSettings = false;
 	let modelOrderDirty = false;
@@ -122,6 +125,8 @@
 
 	const isPresetModel = (model: any) =>
 		!!(model?.preset || model?.base_model_id || model?.info?.base_model_id);
+	const canResetModel = (model: ModelListItem | null) =>
+		!!model && !isPresetModel(model) && availableModelIds.has(model.id);
 	const modelTags = (model: any): string[] =>
 		(model?.meta?.tags ?? [])
 			.map((tag) => (typeof tag === 'string' ? tag : tag?.name))
@@ -480,7 +485,10 @@
 		model = { ...model, ...(isPresetModel(model) ? {} : { base_model_id: null }), ...overrides };
 
 		if (savedModels.find((m: ModelListItem) => m.id === model.id) || isPresetModel(model)) {
-			const res = await updateModelById(localStorage.token, model.id, model).catch((error) => {
+			const res = await updateModelById(localStorage.token, model.id, {
+				...savedModels.find((m: ModelListItem) => m.id === model.id),
+				...model
+			}).catch((error) => {
 				return null;
 			});
 
@@ -501,6 +509,10 @@
 				return null;
 			});
 
+			if (res) {
+				savedModels = [...savedModels, res];
+			}
+
 			if (res && showToast) {
 				toast.success($i18n.t('Model updated successfully'));
 				await init().catch((error) => toast.error(`${error}`));
@@ -510,8 +522,8 @@
 	};
 
 	const toggleModelHandler = async (model) => {
-		if (!Object.keys(model).includes('base_model_id') && !isPresetModel(model)) {
-			await createNewModel(localStorage.token, {
+		if (!savedModels.find((m: ModelListItem) => m.id === model.id) && !isPresetModel(model)) {
+			const res = await createNewModel(localStorage.token, {
 				id: model.id,
 				name: model.name,
 				base_model_id: null,
@@ -522,6 +534,10 @@
 			}).catch((error) => {
 				return null;
 			});
+
+			if (res) {
+				savedModels = [...savedModels, res];
+			}
 		} else {
 			await toggleModelById(localStorage.token, model.id);
 		}
@@ -533,6 +549,29 @@
 				$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null)
 			)
 		);
+	};
+
+	const deleteModelHandler = async (model: ModelListItem) => {
+		try {
+			// Read fresh records: visibility and access changes can create saved settings.
+			const savedModels = await getAllModels(localStorage.token);
+			if (savedModels.some((savedModel: ModelListItem) => savedModel.id === model.id)) {
+				const res = await deleteModelById(localStorage.token, model.id);
+				if (!res) {
+					toast.error($i18n.t('Failed to delete model'));
+					return;
+				}
+			}
+
+			toast.success(
+				canResetModel(model)
+					? $i18n.t('Model reset successfully')
+					: $i18n.t('Deleted {{name}}', { name: model.name })
+			);
+			await init();
+		} catch (error: any) {
+			toast.error(`${error?.detail ?? error}`);
+		}
 	};
 
 	const hideModelHandler = async (model) => {
@@ -705,6 +744,22 @@
 </script>
 
 <ConfirmDialog
+	title={canResetModel(modelToDelete) ? $i18n.t('Reset') : $i18n.t('Delete')}
+	message={canResetModel(modelToDelete)
+		? $i18n.t(
+				'This will reset the saved settings for this base model to their defaults. The model will remain available.'
+			)
+		: $i18n.t('Are you sure you want to delete **{{modelName}}**?', {
+				modelName: modelToDelete?.name
+			})}
+	confirmLabel={canResetModel(modelToDelete) ? $i18n.t('Reset') : $i18n.t('Delete')}
+	bind:show={showDeleteModal}
+	onConfirm={async () => {
+		if (modelToDelete) await deleteModelHandler(modelToDelete);
+	}}
+/>
+
+<ConfirmDialog
 	title={$i18n.t('Reset All Models')}
 	message={$i18n.t('This will delete all models including custom models and cannot be undone.')}
 	bind:show={showResetModal}
@@ -722,7 +777,7 @@
 {#if models !== null}
 	{#if selectedModelId === null}
 		<div class="flex h-full min-h-0 flex-col text-sm">
-			<div class="mb-2 flex items-center justify-between">
+			<div class="mb-0.5 flex items-center justify-between">
 				<h2 class="text-sm font-medium text-gray-900 dark:text-white">
 					{$i18n.t('settings.admin.models.title')}
 					<span class="ml-2 font-normal text-gray-500 dark:text-gray-500">
@@ -839,7 +894,7 @@
 							</Tooltip>
 
 							<div slot="content">
-								<DropdownMenu className="w-[10.625rem] shadow-sm">
+								<DropdownMenu className="min-w-[10.625rem] shadow-sm">
 									{#if $user?.role === 'admin'}
 										<button
 											class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] disabled:pointer-events-none disabled:opacity-40 hover:text-gray-900 dark:hover:text-gray-100"
@@ -1180,6 +1235,11 @@
 									<ModelMenu
 										user={$user}
 										{model}
+										deleteLabel={canResetModel(model) ? $i18n.t('Reset') : $i18n.t('Delete')}
+										deleteHandler={() => {
+											modelToDelete = model;
+											showDeleteModal = true;
+										}}
 										exportHandler={() => {
 											exportModelHandler(model);
 										}}
@@ -1250,7 +1310,7 @@
 
 				<div class="flex justify-end pt-6 text-sm font-normal">
 					<button
-						class="flex items-center gap-2 px-3.5 py-1.5 text-sm font-normal bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full disabled:cursor-not-allowed disabled:opacity-40"
+						class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white disabled:cursor-not-allowed"
 						type="button"
 						disabled={(!modelOrderDirty && !modelDefaultsDirty) ||
 							savingModelOrder ||
@@ -1262,7 +1322,7 @@
 						{$i18n.t('Save')}
 						{#if savingModelOrder || savingModelsSettings}
 							<span class="shrink-0">
-								<Spinner />
+								<Spinner className="size-3" />
 							</span>
 						{/if}
 					</button>

@@ -11,7 +11,7 @@
 	import LocalizedFormat from 'dayjs/plugin/localizedFormat';
 	dayjs.extend(LocalizedFormat);
 
-	const i18n = getContext('i18n');
+	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
 
 	export let recording = false;
 	export let transcribe = true;
@@ -87,6 +87,7 @@
 	};
 
 	let stream;
+	let audioContext: AudioContext | null = null;
 	let speechRecognition;
 
 	let mediaRecorder;
@@ -116,8 +117,14 @@
 		return Math.min(1.0, Math.max(0.01, scaledRMS));
 	};
 
+	// Chrome on Android caps open audio outputs at 10.
+	const closeAudioContext = () => {
+		void audioContext?.close();
+		audioContext = null;
+	};
+
 	const analyseAudio = (stream) => {
-		const audioContext = new AudioContext();
+		audioContext = new AudioContext();
 		const audioStreamSource = audioContext.createMediaStreamSource(stream);
 
 		const analyser = audioContext.createAnalyser();
@@ -175,7 +182,10 @@
 		// Create a blob from the audio chunks
 
 		await tick();
-		const file = blobToFile(audioBlob, `Recording-${dayjs().format('L LT')}.${ext}`);
+		const file = blobToFile(
+			audioBlob,
+			`Recording-${dayjs().locale($i18n.language).format('L LT')}.${ext}`
+		);
 
 		if (transcribe) {
 			if ($config.audio.stt.engine === 'web' || ($settings?.audio?.stt?.engine ?? '') === 'web') {
@@ -396,6 +406,7 @@
 		}
 
 		stream = null;
+		closeAudioContext();
 	};
 
 	const confirmRecording = async () => {
@@ -415,6 +426,7 @@
 		}
 
 		stream = null;
+		closeAudioContext();
 	};
 
 	let resizeObserver;
@@ -460,6 +472,7 @@
 		window.removeEventListener('keydown', handleKeyDown);
 		document.removeEventListener('visibilitychange', handleVisibilityChange);
 		releaseWakeLock();
+		closeAudioContext();
 		// remove resize observer
 		resizeObserver.disconnect();
 	});

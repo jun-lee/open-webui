@@ -1,5 +1,7 @@
 <script lang="ts">
+	import ModelSettingsLabel from '$lib/components/workspace/Models/ModelSettingsLabel.svelte';
 	import { getContext, tick } from 'svelte';
+	import { v4 as uuidv4 } from 'uuid';
 	// @ts-expect-error The existing SortableJS dependency does not ship declarations.
 	import Sortable from 'sortablejs';
 	import type { ModelControl } from '$lib/apis';
@@ -11,7 +13,7 @@
 	import EllipsisVertical from '$lib/components/icons/EllipsisVertical.svelte';
 
 	const i18n: any = getContext('i18n');
-	export let controls: Record<string, ModelControl> = {};
+	export let controls: Record<string, ModelControl> | undefined = undefined;
 	let show = false;
 	let editingKey = '';
 	let label = '';
@@ -23,7 +25,7 @@
 	const actionClass =
 		'flex size-7 shrink-0 items-center justify-center rounded-lg text-gray-500 transition hover:bg-black/5 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-200';
 	const inputClass =
-		'w-full min-w-0 bg-transparent py-1 text-[0.8125rem] text-gray-700 outline-hidden placeholder:text-gray-300 dark:text-gray-300 dark:placeholder:text-gray-700';
+		'w-full min-w-0 bg-transparent py-1 text-[0.8125rem] outline-hidden placeholder:text-gray-300 dark:placeholder:text-gray-700 font-normal text-gray-900 dark:text-gray-100';
 
 	const keyFor = (label: string, items: object) => {
 		let base = label
@@ -40,7 +42,7 @@
 	};
 	const focus = (node: HTMLInputElement) => node.focus();
 	const addOption = () => {
-		options = [...options, { id: crypto.randomUUID(), label: '', params: {} }];
+		options = [...options, { id: uuidv4(), label: '', params: { '': '' } }];
 	};
 	const edit = async (key = '') => {
 		editingKey = key;
@@ -133,19 +135,29 @@
 </script>
 
 <div>
-	<div class="flex h-7 w-full items-center justify-between">
-		<span class="text-xs text-gray-600 dark:text-gray-400">{$i18n.t('Model controls')}</span>
+	<div
+		class="grid grid-cols-[7rem_minmax(0,1fr)_auto] items-center gap-2 px-1 py-1.5 text-xs sm:grid-cols-[8rem_minmax(0,1fr)_auto]"
+	>
+		<span class="text-xs font-normal text-gray-600 dark:text-gray-400"
+			><ModelSettingsLabel
+				label={$i18n.t('Model controls')}
+				description={$i18n.t('Let people choose approved parameter presets in chat.')}
+			/></span
+		>
+		<p
+			class="truncate text-gray-500 dark:text-gray-400"
+			title={$i18n.t('Let people choose approved parameter presets in chat.')}
+		>
+			{$i18n.t('Let people choose approved parameter presets in chat.')}
+		</p>
 		<button
 			type="button"
-			class="rounded p-1 text-gray-500 transition hover:bg-black/5 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-200"
+			class="text-gray-500 transition hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
 			aria-label={$i18n.t('Add control')}
 			title={$i18n.t('Add control')}
 			on:click={() => edit()}><Plus className="size-3" /></button
 		>
 	</div>
-	<p class="mb-1 text-xs leading-4 text-gray-400 dark:text-gray-600">
-		{$i18n.t('Let people choose approved parameter presets in chat.')}
-	</p>
 	<div use:sortable={moveControl}>
 		{#each Object.entries(controls ?? {}) as [key, control], index (key)}
 			<div class="flex items-center gap-1 py-0.5">
@@ -159,7 +171,7 @@
 				>
 				<button
 					type="button"
-					class="flex min-w-0 flex-1 items-center justify-between gap-3 py-1 text-left text-[0.8125rem] text-gray-700 dark:text-gray-300"
+					class="flex min-w-0 flex-1 items-center justify-between gap-3 py-1 text-left text-[0.8125rem] font-normal text-gray-900 dark:text-gray-100"
 					aria-label={`${$i18n.t('Edit')} ${control.label}`}
 					on:click={() => edit(key)}
 				>
@@ -177,7 +189,7 @@
 					class="ml-2 flex shrink-0 items-center justify-center rounded text-gray-400 transition hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300"
 					aria-label={`${$i18n.t('Remove')} ${control.label}`}
 					on:click={() => {
-						delete controls[key];
+						delete controls?.[key];
 						controls = { ...controls };
 					}}><XMark className="size-3" /></button
 				>
@@ -190,7 +202,7 @@
 	<div class="px-5 pb-5 pt-4 dark:text-gray-200">
 		<div class="mb-3 flex items-center justify-between gap-3">
 			<div class="font-primary text-lg font-medium">
-				{$i18n.t(editingKey ? 'Edit control' : 'Add control')}
+				{editingKey ? $i18n.t('Edit control') : $i18n.t('Add control')}
 			</div>
 			<button
 				type="button"
@@ -202,7 +214,8 @@
 		<form class="space-y-2.5" on:submit|preventDefault|stopPropagation={apply}>
 			<div class="grid grid-cols-[minmax(0,1fr)_minmax(0,8rem)] gap-4">
 				<label class="block min-w-0 text-xs leading-4">
-					<span class="text-xs text-gray-400 dark:text-gray-600">{$i18n.t('Name')}</span>
+					<span class="text-xs font-normal text-gray-600 dark:text-gray-400">{$i18n.t('Name')}</span
+					>
 					<input
 						bind:this={nameInput}
 						class={inputClass}
@@ -213,7 +226,9 @@
 					/>
 				</label>
 				<label class="block min-w-0 text-xs leading-4">
-					<span class="text-xs text-gray-400 dark:text-gray-600">{$i18n.t('Default option')}</span>
+					<span class="text-xs font-normal text-gray-600 dark:text-gray-400"
+						>{$i18n.t('Default option')}</span
+					>
 					<NativeSelect
 						value={defaultOption}
 						options={[
@@ -228,11 +243,15 @@
 				</label>
 			</div>
 			<label class="block text-xs leading-4">
-				<span class="text-xs text-gray-400 dark:text-gray-600">{$i18n.t('Description')}</span>
+				<span class="text-xs font-normal text-gray-600 dark:text-gray-400"
+					>{$i18n.t('Description')}</span
+				>
 				<input class={inputClass} placeholder={$i18n.t('Optional')} bind:value={description} />
 			</label>
 			<div class="flex items-center justify-between">
-				<span class="text-xs text-gray-400 dark:text-gray-600">{$i18n.t('Display')}</span>
+				<span class="text-xs font-normal text-gray-600 dark:text-gray-400"
+					>{$i18n.t('Display')}</span
+				>
 				<div class="flex gap-1">
 					{#each ['menu', 'slider'] as mode}
 						<button
@@ -243,22 +262,15 @@
 								: 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'}"
 							on:click={() => (display = mode as 'menu' | 'slider')}
 						>
-							{$i18n.t(mode === 'slider' ? 'Slider' : 'Menu')}
+							{mode === 'slider' ? $i18n.t('Slider') : $i18n.t('Menu')}
 						</button>
 					{/each}
 				</div>
 			</div>
 			<div>
-				<div class="flex items-center justify-between">
-					<span class="text-xs text-gray-400 dark:text-gray-600">{$i18n.t('Options')}</span>
-					<button
-						type="button"
-						class="rounded p-1 text-gray-500 transition hover:bg-black/5 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-200"
-						aria-label={$i18n.t('Add option')}
-						title={$i18n.t('Add option')}
-						on:click={addOption}><Plus className="size-3" /></button
-					>
-				</div>
+				<span class="text-xs font-normal text-gray-600 dark:text-gray-400"
+					>{$i18n.t('Options')}</span
+				>
 				<div class="divide-y divide-gray-100/60 dark:divide-gray-850/60" use:sortable={moveOption}>
 					{#each options as option, index (option.id)}
 						<div class="py-1.5">
@@ -293,6 +305,14 @@
 						</div>
 					{/each}
 				</div>
+				<button
+					type="button"
+					class="mt-1 flex items-center gap-1.5 py-1 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
+					on:click={addOption}
+				>
+					<Plus className="size-3" />
+					<span>{$i18n.t('Add option')}</span>
+				</button>
 			</div>
 			{#if display === 'slider' && options.length < 2}
 				<p class="text-xs text-gray-500 dark:text-gray-400">
@@ -302,7 +322,7 @@
 			<div class="flex justify-end gap-1.5 pt-1 text-sm font-medium">
 				<button
 					type="button"
-					class="rounded-full px-3.5 py-1.5 transition hover:bg-gray-100 dark:hover:bg-gray-850"
+					class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-normal transition disabled:opacity-60 hover:bg-gray-100 dark:hover:bg-gray-850"
 					on:click={() => (show = false)}>{$i18n.t('Cancel')}</button
 				>
 				<button
@@ -311,7 +331,7 @@
 						!options.length ||
 						(display === 'slider' && options.length < 2) ||
 						options.some((option) => !option.label.trim())}
-					class="rounded-full bg-black px-3.5 py-1.5 text-white transition hover:bg-gray-950 disabled:opacity-40 dark:bg-white dark:text-black dark:hover:bg-gray-100"
+					class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
 					>{$i18n.t('Apply')}</button
 				>
 			</div>

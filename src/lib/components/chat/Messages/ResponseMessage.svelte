@@ -569,13 +569,16 @@
 				console.log(tags);
 
 				if (tags) {
-					updatedMessage.annotation.tags = tags;
-					feedbackItem.data.tags = tags;
+					const taggedMessage = {
+						...message,
+						annotation: { ...(message?.annotation ?? {}), tags: tags }
+					};
+					feedbackItem.data = { ...feedbackItem.data, ...taggedMessage.annotation };
 
-					saveMessage(message.id, updatedMessage);
+					saveMessage(message.id, taggedMessage);
 					await updateFeedbackById(
 						localStorage.token,
-						updatedMessage.feedbackId,
+						taggedMessage.feedbackId,
 						feedbackItem
 					).catch((error) => {
 						toast.error(`${error}`);
@@ -799,7 +802,7 @@
 									<div>
 										<button
 											id="save-new-message-button"
-											class="px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 border border-gray-100 dark:border-gray-700 text-gray-700 dark:text-gray-200 transition rounded-3xl"
+											class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-100 px-2.5 text-xs font-normal text-gray-800 transition hover:bg-gray-100/70 disabled:opacity-60 dark:bg-gray-850 dark:text-white dark:hover:bg-gray-850/60"
 											on:click={() => {
 												saveAsCopyHandler();
 											}}
@@ -811,7 +814,7 @@
 									<div class="flex space-x-1.5">
 										<button
 											id="close-edit-message-button"
-											class="px-2.5 py-1 bg-white dark:bg-gray-900 hover:bg-gray-100 text-gray-800 dark:text-gray-100 transition rounded-3xl"
+											class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-normal text-gray-600 transition hover:bg-gray-100 hover:text-gray-900 disabled:opacity-60 dark:text-gray-400 dark:hover:bg-gray-850 dark:hover:text-white"
 											on:click={() => {
 												cancelEditMessage();
 											}}
@@ -819,15 +822,17 @@
 											{$i18n.t('Cancel')}
 										</button>
 
-										<button
-											id="confirm-edit-message-button"
-											class="px-2.5 py-1 bg-gray-900 dark:bg-white hover:bg-gray-850 text-gray-100 dark:text-gray-800 transition rounded-3xl"
-											on:click={() => {
-												editMessageConfirmHandler();
-											}}
-										>
-											{$i18n.t('Save')}
-										</button>
+										{#if !message.user_id || message.user_id === $user?.id}
+											<button
+												id="confirm-edit-message-button"
+												class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+												on:click={() => {
+													editMessageConfirmHandler();
+												}}
+											>
+												{$i18n.t('Save')}
+											</button>
+										{/if}
 									</div>
 								</div>
 							</div>
@@ -903,7 +908,7 @@
 							{#if !message.done && !message.error && (hasResponseContent || !hasVisibleStatus)}
 								<div class="text-[0.9375rem] leading-relaxed">
 									<span
-										class="inline-block w-[0.125rem] h-3.5 bg-gray-400 dark:bg-gray-500 ml-0.5 animate-pulse align-text-bottom"
+										class="inline-block w-[0.125rem] h-3.5 bg-gray-400 dark:bg-gray-500 ml-0.5 animate-cursor-pulse align-text-bottom"
 									></span>
 								</div>
 							{/if}
@@ -933,14 +938,14 @@
 					<div class="mt-0.5 flex justify-start whitespace-nowrap text-gray-600 dark:text-gray-500">
 						<Tooltip
 							className="flex self-center"
-							content={formatMessageTimestampFull(message.timestamp * 1000)}
+							content={formatMessageTimestampFull(message.timestamp * 1000, $i18n.language)}
 							placement="bottom"
 						>
 							<time
 								datetime={new Date(message.timestamp * 1000).toISOString()}
 								class="ml-1 shrink-0 whitespace-nowrap text-[0.6875rem] tabular-nums text-gray-400 dark:text-gray-600 select-none"
 							>
-								{formatMessageTimestamp(message.timestamp * 1000)}
+								{formatMessageTimestamp(message.timestamp * 1000, $i18n.language)}
 							</time>
 						</Tooltip>
 					</div>
@@ -1256,6 +1261,37 @@
 									</Tooltip>
 								{/if}
 
+								{#if $user && message.done && forkHandler && ($user?.role === 'admin' || ($user?.permissions?.chat?.import ?? true))}
+									<Tooltip content={$i18n.t('Fork chat')} placement="bottom">
+										<button
+											aria-label={$i18n.t('Fork chat')}
+											class="{isLastMessage || ($settings?.highContrastMode ?? false)
+												? 'visible'
+												: 'hover-reveal'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition"
+											on:click={() => {
+												forkHandler?.(message.id);
+											}}
+										>
+											<svg
+												class="w-4 h-4"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.8"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												aria-hidden="true"
+											>
+												<path d="M4 12H9" />
+												<path d="M9 12C12.5 12 12.5 7 16 7H20" />
+												<path d="M17 4L20 7L17 10" />
+												<path d="M9 12C12.5 12 12.5 17 16 17H20" />
+												<path d="M17 14L20 17L17 20" />
+											</svg>
+										</button>
+									</Tooltip>
+								{/if}
+
 								{#if (!readOnly && (!message.user_id || message.user_id === $user?.id)) || (shareMode === 'continue' && message.user_id === $user?.id)}
 									{#if !readOnly && !$temporaryChatEnabled && ($config?.features.enable_message_rating ?? true) && ($user?.role === 'admin' || ($user?.permissions?.chat?.rate_response ?? true))}
 										<Tooltip content={$i18n.t('Good Response')} placement="bottom">
@@ -1269,7 +1305,8 @@
 													? 'bg-gray-100 dark:bg-gray-800'
 													: ''} dark:hover:text-white hover:text-black transition disabled:cursor-progress disabled:hover:bg-transparent"
 												disabled={feedbackLoading}
-												on:click={async () => {
+												on:click={async (e) => {
+													e.stopPropagation();
 													await feedbackHandler(1);
 													window.setTimeout(() => {
 														document
@@ -1307,7 +1344,8 @@
 													? 'bg-gray-100 dark:bg-gray-800'
 													: ''} dark:hover:text-white hover:text-black transition disabled:cursor-progress disabled:hover:bg-transparent"
 												disabled={feedbackLoading}
-												on:click={async () => {
+												on:click={async (e) => {
+													e.stopPropagation();
 													await feedbackHandler(-1);
 													window.setTimeout(() => {
 														document
@@ -1530,37 +1568,6 @@
 										</Tooltip>
 									{/each}
 
-									{#if message.done && !readOnly && forkHandler && ($user?.role === 'admin' || ($user?.permissions?.chat?.import ?? true))}
-										<Tooltip content={$i18n.t('Fork chat')} placement="bottom">
-											<button
-												aria-label={$i18n.t('Fork chat')}
-												class="{isLastMessage || ($settings?.highContrastMode ?? false)
-													? 'visible'
-													: 'hover-reveal'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition"
-												on:click={() => {
-													forkHandler?.(message.id);
-												}}
-											>
-												<svg
-													class="w-4 h-4"
-													viewBox="0 0 24 24"
-													fill="none"
-													stroke="currentColor"
-													stroke-width="1.8"
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													aria-hidden="true"
-												>
-													<path d="M4 12H9" />
-													<path d="M9 12C12.5 12 12.5 7 16 7H20" />
-													<path d="M17 4L20 7L17 10" />
-													<path d="M9 12C12.5 12 12.5 17 16 17H20" />
-													<path d="M17 14L20 17L17 20" />
-												</svg>
-											</button>
-										</Tooltip>
-									{/if}
-
 									{#if $user?.role === 'admin' || ($user?.permissions?.chat?.delete_message ?? true)}
 										{#if siblings.length > 1}
 											<Tooltip content={$i18n.t('Delete')} placement="bottom">
@@ -1606,14 +1613,14 @@
 									{#if message.timestamp}
 										<Tooltip
 											className="flex self-center"
-											content={formatMessageTimestampFull(message.timestamp * 1000)}
+											content={formatMessageTimestampFull(message.timestamp * 1000, $i18n.language)}
 											placement="bottom"
 										>
 											<time
 												datetime={new Date(message.timestamp * 1000).toISOString()}
 												class="hover-reveal ml-1 shrink-0 whitespace-nowrap text-[0.6875rem] tabular-nums text-gray-400 dark:text-gray-600 select-none"
 											>
-												{formatMessageTimestamp(message.timestamp * 1000)}
+												{formatMessageTimestamp(message.timestamp * 1000, $i18n.language)}
 											</time>
 										</Tooltip>
 									{/if}

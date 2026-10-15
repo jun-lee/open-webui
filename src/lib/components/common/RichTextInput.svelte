@@ -135,10 +135,10 @@
 	import { onMount, onDestroy, tick, getContext } from 'svelte';
 	import { createEventDispatcher } from 'svelte';
 
-	const i18n = getContext('i18n');
+	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
 	const eventDispatch = createEventDispatcher();
 
-	import { Fragment, DOMParser } from 'prosemirror-model';
+	import { Fragment, DOMParser, Slice, type Node, type Schema } from 'prosemirror-model';
 	import { EditorState, Plugin, PluginKey, TextSelection, Selection } from 'prosemirror-state';
 	import { Decoration, DecorationSet } from 'prosemirror-view';
 	import { Editor, Extension, markInputRule, mergeAttributes } from '@tiptap/core';
@@ -226,15 +226,15 @@
 	export let documentId = '';
 
 	export let className = 'input-prose min-h-fit h-full';
-	export let placeholder = $i18n.t('Type here...');
-	let _placeholder = placeholder;
+	export let placeholder: string | undefined = undefined;
+	let _placeholder = '';
 
-	$: if (placeholder !== _placeholder) {
-		setPlaceholder();
+	$: if ((placeholder ?? $i18n.t('Type here...')) !== _placeholder) {
+		setPlaceholder(placeholder ?? $i18n.t('Type here...'));
 	}
 
-	const setPlaceholder = () => {
-		_placeholder = placeholder;
+	const setPlaceholder = (value: string) => {
+		_placeholder = value;
 		if (editor) {
 			editor?.view.dispatch(editor.state.tr);
 		}
@@ -303,6 +303,27 @@
 		return `${char}${label}`;
 	};
 
+	// Plain-text mode still preserves mention identities from the clipboard's HTML.
+	const plainMentionPaste = (slice: Slice, schema: Schema): Fragment | null => {
+		const nodes: Node[] = [];
+		let hasMention = false;
+		let firstBlock = true;
+		slice.content.descendants((node) => {
+			if (node.isTextblock) {
+				if (!firstBlock) nodes.push(schema.nodes.hardBreak.create());
+				firstBlock = false;
+			}
+			if (node.type.name === 'mention') {
+				hasMention = true;
+				nodes.push(node.mark([]));
+				return false;
+			}
+			if (node.isText) nodes.push(schema.text(node.text!));
+			else if (node.type.name === 'hardBreak') nodes.push(node.mark([]));
+		});
+		return hasMention ? Fragment.fromArray(nodes) : null;
+	};
+
 	export let onSelectionUpdate = (e) => {};
 
 	export let id = '';
@@ -338,6 +359,38 @@
 	let htmlValue = '';
 	let jsonValue = '';
 	let mdValue = '';
+
+	const serializeContent = (richText: boolean) => {
+		if (!editor) return;
+
+		htmlValue = editor.getHTML();
+		jsonValue = editor.getJSON();
+
+		if (richText) {
+			mdValue = turndownService
+				.turndown(
+					htmlValue
+						.replace(/<p><\/p>/g, '<br/>')
+						.replace(/ {2,}/g, (m) => m.replace(/ /g, '\u00a0'))
+				)
+				.replace(/\u00a0/g, ' ');
+		} else {
+			mdValue = turndownService
+				.turndown(
+					htmlValue
+						// Replace empty paragraphs with line breaks
+						.replace(/<p><\/p>/g, '<br/>')
+						// Replace multiple spaces with non-breaking spaces
+						.replace(/ {2,}/g, (m) => m.replace(/ /g, '\u00a0'))
+						// Replace tabs with non-breaking spaces (preserve indentation)
+						.replace(/\t/g, '\u00a0\u00a0\u00a0\u00a0') // 1 tab = 4 spaces
+				)
+				// Convert non-breaking spaces back to regular spaces for markdown
+				.replace(/\u00a0/g, ' ');
+		}
+	};
+
+	$: serializeContent(richText);
 
 	let provider: SocketIOCollaborationProvider | null = null;
 
@@ -936,7 +989,7 @@
 			],
 			content: provider ? undefined : content,
 			autofocus: messageInput && !$showCallOverlay,
-			onTransaction: () => {
+			onTransaction: ({ transaction }) => {
 				if (!editor) return;
 
 				// Defer Svelte reactivity trigger to rAF so we don't interleave
@@ -950,30 +1003,9 @@
 					});
 				}
 
-				htmlValue = editor.getHTML();
-				jsonValue = editor.getJSON();
-
-				if (richText) {
-					mdValue = turndownService
-						.turndown(
-							htmlValue
-								.replace(/<p><\/p>/g, '<br/>')
-								.replace(/ {2,}/g, (m) => m.replace(/ /g, '\u00a0'))
-						)
-						.replace(/\u00a0/g, ' ');
-				} else {
-					mdValue = turndownService
-						.turndown(
-							htmlValue
-								// Replace empty paragraphs with line breaks
-								.replace(/<p><\/p>/g, '<br/>')
-								// Replace multiple spaces with non-breaking spaces
-								.replace(/ {2,}/g, (m) => m.replace(/ /g, '\u00a0'))
-								// Replace tabs with non-breaking spaces (preserve indentation)
-								.replace(/\t/g, '\u00a0\u00a0\u00a0\u00a0') // 1 tab = 4 spaces
-						)
-						// Convert non-breaking spaces back to regular spaces for markdown
-						.replace(/\u00a0/g, ' ');
+				// Compare the final document to include changes from appended transactions.
+				if (jsonValue === '' || transaction.before !== editor.state.doc) {
+					serializeContent(richText);
 				}
 
 				onChange({
@@ -981,6 +1013,7 @@
 					json: jsonValue,
 					md: mdValue
 				});
+				if (transaction.getMeta('paste')) eventDispatch('pasted');
 
 				if (json) {
 					value = jsonValue;
@@ -988,12 +1021,8 @@
 					if (raw) {
 						value = htmlValue;
 					} else {
-						if (!preserveBreaks) {
-							mdValue = mdValue.replace(/<br\/>/g, '');
-						}
-
-						if (value !== mdValue) {
-							value = mdValue;
+						if (value !== (preserveBreaks ? mdValue : mdValue.replace(/<br\/>/g, ''))) {
+							value = preserveBreaks ? mdValue : mdValue.replace(/<br\/>/g, '');
 
 							// check if the node is paragraph as well
 							if (editor.isActive('paragraph')) {
@@ -1009,6 +1038,24 @@
 				// the tiptap placeholder never becomes the field's accessible name;
 				// function form so a placeholder change is picked up after mount
 				attributes: () => ({ id, 'aria-label': _placeholder }),
+				transformPasted: (slice) => {
+					const stripMentionLinks = (fragment: Fragment): Fragment => {
+						const nodes: Node[] = [];
+						fragment.forEach((node) => {
+							nodes.push(
+								node.type.name === 'mention'
+									? node.mark(
+											node.marks.filter((mark) => !['link', 'underline'].includes(mark.type.name))
+										)
+									: node.isLeaf
+										? node
+										: node.copy(stripMentionLinks(node.content))
+							);
+						});
+						return Fragment.fromArray(nodes);
+					};
+					return new Slice(stripMentionLinks(slice.content), slice.openStart, slice.openEnd);
+				},
 				handleDrop: (view, event) => {
 					// Intercept sidebar chat item drops to prevent ProseMirror
 					// from inserting the raw JSON as text. The actual handling
@@ -1027,10 +1074,10 @@
 					}
 					return false;
 				},
-				handlePaste: (view, event) => {
+				handlePaste: (view, event, slice) => {
 					// Paste literal text when automatic formatting is disabled.
 					if (!richText || !autoFormat) {
-						// swallow HTML completely
+						// Discard formatting while retaining explicit mention identities.
 						event.preventDefault();
 						const { state, dispatch } = view;
 
@@ -1041,6 +1088,17 @@
 
 						if (state.selection.$from.parent.type.spec.code) {
 							dispatch(state.tr.insertText(plainText).scrollIntoView());
+							return true;
+						}
+
+						const mentions = plainMentionPaste(slice, state.schema);
+						if (mentions) {
+							dispatch(
+								state.tr
+									.replaceWith(state.selection.from, state.selection.to, mentions)
+									.setMeta('paste', true)
+									.scrollIntoView()
+							);
 							return true;
 						}
 
@@ -1060,6 +1118,7 @@
 						dispatch(
 							state.tr
 								.replaceWith(state.selection.from, state.selection.to, fragment)
+								.setMeta('paste', true)
 								.scrollIntoView()
 						);
 
@@ -1245,7 +1304,7 @@
 									});
 
 									const fragment = Fragment.fromArray(nodes);
-									const tr = state.tr.replaceWith(from, to, fragment);
+									const tr = state.tr.replaceWith(from, to, fragment).setMeta('paste', true);
 									dispatch(tr.scrollIntoView());
 									event.preventDefault();
 									return true;
@@ -1346,7 +1405,9 @@
 	const onValueChange = () => {
 		if (!editor) return;
 
-		const jsonValue = editor.getJSON();
+		if (value !== '' && value === jsonValue) return;
+
+		const editorJsonValue = editor.getJSON();
 		const htmlValue = editor.getHTML();
 		let mdValue = turndownService
 			.turndown(
@@ -1365,7 +1426,7 @@
 		}
 
 		if (json) {
-			if (!equalEditorJSON(value, jsonValue)) {
+			if (!equalEditorJSON(value, editorJsonValue)) {
 				editor.commands.setContent(value);
 				selectTemplate();
 			}

@@ -31,20 +31,18 @@
 	};
 </script>
 
-<div class="my-3 flex items-center justify-between gap-3">
-	<div>
-		<div class="text-xs text-gray-500">{$i18n.t('Voice avatar')}</div>
-		<div class="text-sm mt-0.5">{$i18n.t(value ? 'Custom avatar' : 'Default orb')}</div>
-	</div>
-	<button
-		type="button"
-		{disabled}
-		class="text-xs text-gray-500 transition hover:text-gray-700 dark:hover:text-gray-300"
-		on:click={open}
+<button
+	type="button"
+	{disabled}
+	on:click={open}
+	class="grid min-h-8 w-full grid-cols-[7rem_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-1 text-left text-xs font-normal disabled:opacity-50 sm:grid-cols-[8rem_minmax(0,1fr)_auto]"
+>
+	<span class="text-gray-600 dark:text-gray-400">{$i18n.t('Voice avatar')}</span>
+	<span class="truncate text-gray-900 dark:text-gray-100"
+		>{value ? $i18n.t('Custom avatar') : $i18n.t('Default')}</span
 	>
-		{$i18n.t('Configure')}
-	</button>
-</div>
+	<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Configure')}</span>
+</button>
 
 <Modal bind:show size="sm">
 	<div class="p-5 text-gray-900 dark:text-gray-100">
@@ -74,7 +72,7 @@
 		<div class="flex justify-end gap-2 mt-5">
 			<button
 				type="button"
-				class="px-3.5 py-1.5 text-sm font-normal rounded-full transition-colors hover:bg-gray-100 dark:hover:bg-gray-850"
+				class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-normal transition disabled:opacity-60 hover:bg-gray-100 dark:hover:bg-gray-850"
 				on:click={() => {
 					show = false;
 				}}>{$i18n.t('Cancel')}</button
@@ -82,7 +80,7 @@
 			<button
 				type="button"
 				disabled={!valid}
-				class="px-3.5 py-1.5 text-sm font-normal bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition-colors rounded-full disabled:opacity-40"
+				class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
 				on:click={apply}>{$i18n.t('Apply')}</button
 			>
 		</div>

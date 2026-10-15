@@ -9,7 +9,7 @@
 	import { settings, chatId, WEBUI_NAME, models, config, user as sessionUser } from '$lib/stores';
 	import { convertMessagesToHistory, createMessagesList } from '$lib/utils';
 
-	import { getChatByShareId, cloneSharedChatById } from '$lib/apis/chats';
+	import { getChatByShareId, cloneSharedChatById, forkChatById } from '$lib/apis/chats';
 
 	import Messages from '$lib/components/chat/Messages.svelte';
 
@@ -17,10 +17,11 @@
 	import { getModels } from '$lib/apis';
 	import { toast } from 'svelte-sonner';
 
-	const i18n = getContext('i18n');
+	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
 	dayjs.extend(localizedFormat);
 
 	let loaded = false;
+	let forking = false;
 
 	let autoScroll = true;
 	let processing = '';
@@ -109,7 +110,7 @@
 
 		if (chat?.chat?.share_mode === 'continue' && chat.id !== shareId) {
 			await goto(`/c/${chat.id}`, { replaceState: true });
-			return;
+			return true;
 		}
 
 		if (chat) {
@@ -147,6 +148,30 @@
 			} else {
 				return null;
 			}
+		}
+	};
+
+	const forkSharedChat = async (messageId: string | null = null) => {
+		const shareId = $page.params.id;
+		if (!canClone || !shareId || forking) return;
+		forking = true;
+		const toastId = toast.loading($i18n.t('Forking chat...'));
+		try {
+			const result = await forkChatById(
+				localStorage.token,
+				shareId,
+				messageId ?? history.currentId
+			);
+			if (result?.id) {
+				await goto(`/c/${result.id}`);
+				toast.success($i18n.t('Chat forked'), { id: toastId });
+			} else {
+				toast.error($i18n.t('Failed to fork chat'), { id: toastId });
+			}
+		} catch (error) {
+			toast.error(`${error}`, { id: toastId });
+		} finally {
+			forking = false;
 		}
 	};
 
@@ -205,9 +230,13 @@
 						</h1>
 						<time
 							class="ms-auto shrink-0 whitespace-nowrap text-xs text-gray-400 dark:text-gray-500"
-							datetime={dayjs(chat.chat.timestamp || chat.created_at * 1000).toISOString()}
+							datetime={dayjs(chat.chat.timestamp || chat.created_at * 1000)
+								.locale($i18n.language)
+								.toISOString()}
 						>
-							{dayjs(chat.chat.timestamp || chat.created_at * 1000).format('LLL')}
+							{dayjs(chat.chat.timestamp || chat.created_at * 1000)
+								.locale($i18n.language)
+								.format('LLL')}
 						</time>
 					</div>
 				</header>
@@ -220,6 +249,7 @@
 							{user}
 							chatId={$chatId}
 							readOnly={true}
+							forkHandler={canClone ? forkSharedChat : null}
 							{selectedModels}
 							{processing}
 							bind:history
@@ -236,10 +266,10 @@
 
 			{#if canClone}
 				<div
-					class="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center bg-linear-to-t from-white dark:from-gray-900 to-transparent pb-5 pt-10"
+					class="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center gap-2 bg-linear-to-t from-white dark:from-gray-900 to-transparent pb-5 pt-10"
 				>
 					<button
-						class="pointer-events-auto rounded-full bg-black px-3.5 py-1.5 text-xs font-medium text-white transition hover:bg-gray-800 dark:bg-white dark:text-black dark:hover:bg-gray-200 disabled:opacity-50"
+						class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white pointer-events-auto"
 						on:click={cloneSharedChat}
 					>
 						{$i18n.t('Clone Chat')}

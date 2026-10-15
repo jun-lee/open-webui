@@ -1,4 +1,6 @@
 <script lang="ts">
+	import WorkspaceAccessModal from './common/WorkspaceAccessModal.svelte';
+	let accessModal: WorkspaceAccessModal;
 	import dayjs from 'dayjs';
 	import relativeTime from 'dayjs/plugin/relativeTime';
 	import { toast } from 'svelte-sonner';
@@ -258,10 +260,7 @@
 	};
 
 	const createPromptHandler = async (prompt: PromptDraft) => {
-		const res = await createNewPrompt(localStorage.token, prompt).catch((error) => {
-			toast.error(`${error}`);
-			return null;
-		});
+		const res = await createNewPrompt(localStorage.token, prompt);
 
 		if (res) {
 			toast.success($i18n.t('Prompt created successfully'));
@@ -269,6 +268,7 @@
 			await getPromptList();
 			await closeCreateModal();
 		}
+		return res;
 	};
 
 	const cloneHandler = async (prompt) => {
@@ -376,6 +376,8 @@
 		clearTimeout(searchDebounceTimer);
 	});
 </script>
+
+<WorkspaceAccessModal bind:this={accessModal} resourceType="prompts" onUpdated={getPromptList} />
 
 <svelte:head>
 	<!-- LICENSE covers this Open WebUI browser-title identifier.
@@ -604,14 +606,16 @@
 											</div>
 
 											<Tooltip
-												content={dayjs((prompt.updated_at ?? prompt.created_at) * 1000).format(
-													'LLLL'
-												)}
+												content={dayjs((prompt.updated_at ?? prompt.created_at) * 1000)
+													.locale($i18n.language)
+													.format('LLLL')}
 											>
 												<div
 													class="shrink-0 truncate text-[0.6875rem] leading-5 text-gray-400 dark:text-gray-600"
 												>
-													{dayjs((prompt.updated_at ?? prompt.created_at) * 1000).fromNow()}
+													{dayjs((prompt.updated_at ?? prompt.created_at) * 1000)
+														.locale($i18n.language)
+														.fromNow()}
 												</div>
 											</Tooltip>
 
@@ -688,6 +692,7 @@
 
 									<div class="ml-0.5 flex shrink-0 flex-row items-center gap-1.5 self-center">
 										<PromptMenu
+											accessHandler={() => accessModal.open(prompt.id)}
 											writeAccess={prompt.write_access}
 											show={openPromptMenuId === prompt.id}
 											editHandler={() => {
@@ -775,7 +780,7 @@
 
 	{#if $config?.features.enable_community_sharing}
 		<CommunityDiscover
-			href="https://openwebui.com/prompts"
+			href="https://openwebui.com/search?type=prompt"
 			title={$i18n.t('Discover a prompt')}
 			description={$i18n.t('Discover, download, and explore custom prompts')}
 		/>

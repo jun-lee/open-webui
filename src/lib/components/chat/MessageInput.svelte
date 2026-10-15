@@ -96,6 +96,7 @@
 	import GlobeAlt from '../icons/GlobeAlt.svelte';
 	import Photo from '../icons/Photo.svelte';
 	import Wrench from '../icons/Wrench.svelte';
+	import ArrowUpLeft from '../icons/ArrowUpLeft.svelte';
 	import Cube from '../icons/Cube.svelte';
 	import Sparkles from '../icons/Sparkles.svelte';
 	import Mic from '../icons/Mic.svelte';
@@ -125,6 +126,7 @@
 	const i18n: any = getContext('i18n');
 
 	type AskUserPrompt = {
+		id?: string;
 		show: boolean;
 		questions: any[];
 		allowOther: boolean;
@@ -153,6 +155,7 @@
 	export let contextCompactionEnabled = false;
 	export let embedded = false;
 	export let callActive = false;
+	export let callEnabled = true;
 
 	export let autoScroll = false;
 	export let generating = false;
@@ -740,7 +743,7 @@
 	}
 
 	let chatInputContainerElement;
-	let chatInputElement;
+	let chatInputElement: RichTextInput;
 	let modelSelector;
 
 	let filesInputElement;
@@ -749,6 +752,45 @@
 	let inputFiles;
 
 	let showInputModal = false;
+	let showComparison = false;
+	let comparisonLoading = false;
+	let ComparisonModal: typeof import('../common/DiffEditorModal.svelte').default | null = null;
+	// Preserve the previous comparison description in the translation catalogs.
+	// $i18n.t('Uses the left working copy as your prompt.');
+	let comparisonTarget: {
+		chatId: string;
+		input: RichTextInput;
+		content: string;
+	} | null = null;
+
+	const openComparison = async () => {
+		if (comparisonLoading) return;
+		comparisonLoading = true;
+		const target = { chatId, input: chatInputElement };
+		try {
+			ComparisonModal = (await import('../common/DiffEditorModal.svelte')).default;
+			if (!target.input || target.chatId !== chatId || target.input !== chatInputElement) return;
+			comparisonTarget = { chatId, input: target.input, content: prompt };
+			showComparison = true;
+		} catch {
+			toast.error($i18n.t('Could not open comparison. Please try again.'));
+		} finally {
+			comparisonLoading = false;
+		}
+	};
+
+	const applyComparisonToPrompt = (text: string) => {
+		if (
+			!chatInputElement ||
+			comparisonTarget?.chatId !== chatId ||
+			comparisonTarget?.input !== chatInputElement ||
+			comparisonTarget?.content !== prompt
+		)
+			throw new Error($i18n.t('The prompt has changed. Reopen the comparison before applying.'));
+		// The editor's literal setter preserves mentions without expanding prompt variables.
+		if (text !== comparisonTarget.content) chatInputElement.setText(text);
+		void tick().then(() => focus());
+	};
 
 	export let dragged = false;
 	export let dropzoneId = 'chat-pane';
@@ -1220,7 +1262,7 @@
 		}
 
 		const res = await createNoteHandler(
-			dayjs().format('YYYY-MM-DD'),
+			dayjs().locale($i18n.language).format('YYYY-MM-DD'),
 			inputContent?.md,
 			inputContent?.html
 		);
@@ -1454,6 +1496,7 @@
 							'fork',
 							'status',
 							'model',
+							'compare',
 							'settings',
 							'temporary',
 							'skills:create'
@@ -1492,6 +1535,7 @@
 					onStatus: statusHandler,
 					onFork: forkHandler,
 					onModel: () => modelSelector?.open(),
+					onCompare: openComparison,
 					onSettings: () => showSettings.set(true),
 					onTemporary: temporaryHandler,
 					onCreateSkill: createSkillHandler,
@@ -1650,6 +1694,21 @@
 	});
 </script>
 
+{#if showComparison && ComparisonModal}
+	<svelte:component
+		this={ComparisonModal}
+		bind:show={showComparison}
+		title={$i18n.t('Compare text')}
+		initialContent={comparisonTarget?.content ?? ''}
+		applyLabel={$i18n.t('Use in prompt')}
+		applyDescription={$i18n.t('Uses the proposed revision as your prompt.')}
+		discardMessage={$i18n.t(
+			'Your comparison changes will be discarded. Your prompt will stay unchanged.'
+		)}
+		onApply={applyComparisonToPrompt}
+	/>
+{/if}
+
 <ToolServersModal
 	bind:show={showTools}
 	{selectedToolIds}
@@ -1711,7 +1770,7 @@
 									<span class="font-normal text-black dark:text-white">
 										{typingUsers.map((user) => user.name).join(', ')}
 									</span>
-									{$i18n.t(typingUsers.length === 1 ? 'is typing...' : 'are typing...')}
+									{typingUsers.length === 1 ? $i18n.t('is typing...') : $i18n.t('are typing...')}
 								</div>
 							</div>
 						</div>
@@ -1813,18 +1872,21 @@
 
 						{#if askUser?.show}
 							<div class="mx-1">
-								<AskUserCard
-									show={askUser.show}
-									questions={askUser.questions}
-									allowOther={askUser.allowOther}
-									timeoutMs={askUser.timeoutMs}
-									on:confirm={(e) => {
-										askUser.onConfirm(e.detail);
-									}}
-									on:cancel={() => {
-										askUser.onCancel();
-									}}
-								/>
+								{#key askUser.id}
+									{@const activeAskUser = askUser}
+									<AskUserCard
+										show={askUser.show}
+										questions={askUser.questions}
+										allowOther={askUser.allowOther}
+										timeoutMs={askUser.timeoutMs}
+										on:confirm={(e) => {
+											activeAskUser.onConfirm(e.detail);
+										}}
+										on:cancel={() => {
+											activeAskUser.onCancel();
+										}}
+									/>
+								{/key}
 							</div>
 						{/if}
 
@@ -1935,7 +1997,7 @@
 							id="message-input-container"
 							class="flex-1 flex flex-col relative w-full shadow-lg rounded-3xl border {$temporaryChatEnabled
 								? 'border-dashed border-gray-100 dark:border-gray-800 hover:border-gray-200 focus-within:border-gray-200 hover:dark:border-gray-700 focus-within:dark:border-gray-700'
-								: ' border-gray-100/30 dark:border-gray-850/30 hover:border-gray-200 focus-within:border-gray-100 hover:dark:border-gray-800 focus-within:dark:border-gray-800'} {($settings?.highContrastMode ??
+								: ' border-gray-100/50 dark:border-gray-850/50 hover:border-gray-200 focus-within:border-gray-100 hover:dark:border-gray-800 focus-within:dark:border-gray-800'} {($settings?.highContrastMode ??
 							false)
 								? 'focus-within:outline focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-blue-500 [&_.ProseMirror:focus-visible]:outline-none!'
 								: ''}  transition px-0.5 bg-white/5 dark:bg-gray-500/5 backdrop-blur-sm dark:text-gray-100"
@@ -2132,7 +2194,8 @@
 															text,
 															history?.currentId
 																? createMessagesList(history, history.currentId)
-																: null
+																: null,
+															'general'
 														).catch((error) => {
 															console.log(error);
 
@@ -2266,6 +2329,7 @@
 							<div class=" flex justify-between mt-0.5 mb-2 mx-0.5 max-w-full" dir="ltr">
 								<div class="ml-1 self-end flex items-center">
 									<InputMenu
+										onCompare={openComparison}
 										bind:files
 										selectedModels={selectedModelIds}
 										fileUploadCapableModels={getFilesystemUploadTerminal(
@@ -2603,22 +2667,6 @@
 											</Tooltip>
 										{/if}
 
-										{#each pendingOAuthTools as pendingTool (pendingTool.id)}
-											<Tooltip content={$i18n.t('Click to connect')} placement="top">
-												<button
-													on:click|preventDefault={() => {
-														oauthRedirectHandler(pendingTool, chatInputDraft);
-													}}
-													type="button"
-													class="group px-2 py-[0.3125rem] flex gap-1.5 items-center text-xs rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden
-													text-amber-600 dark:text-amber-400 bg-amber-50 hover:bg-amber-100 dark:bg-amber-400/10 dark:hover:bg-amber-600/10 border border-amber-200/40 dark:border-amber-500/20"
-												>
-													<Wrench className="size-3.5" strokeWidth="1.75" />
-													<span class="truncate">{pendingTool.name}</span>
-												</button>
-											</Tooltip>
-										{/each}
-
 										<!-- Terminal Server Selector -->
 										{#if showTerminalSelector}
 											<TerminalMenu
@@ -2628,6 +2676,22 @@
 														history.messages[history.currentId]?.done != true)}
 											/>
 										{/if}
+
+										{#each pendingOAuthTools as pendingTool (pendingTool.id)}
+											<Tooltip content={$i18n.t('Click to connect')} placement="top">
+												<button
+													aria-label={`${$i18n.t('Click to connect')}: ${pendingTool.name}`}
+													on:click|preventDefault={() => {
+														oauthRedirectHandler(pendingTool, chatInputDraft);
+													}}
+													type="button"
+													class="flex h-[1.875rem] min-w-0 max-w-full translate-y-[0.0625rem] items-center self-center gap-1 bg-transparent px-1 text-[0.8125rem] leading-none text-gray-600 transition-colors duration-150 hover:text-gray-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400 dark:text-gray-300 dark:hover:text-gray-100 dark:focus-visible:outline-gray-500"
+												>
+													<span class="truncate">{pendingTool.name}</span>
+													<ArrowUpLeft className="size-3 shrink-0 rotate-90" strokeWidth="1.5" />
+												</button>
+											</Tooltip>
+										{/each}
 									</div>
 								</div>
 
@@ -2712,10 +2776,12 @@
 											{/if}
 										{/if}
 
-										{#if !embedded && prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}
+										{#if callEnabled && !embedded && prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}
 											<div class=" flex items-center">
 												<!-- {$i18n.t('Call')} -->
-												<Tooltip content={$i18n.t(callActive ? 'Call in progress' : 'Voice mode')}>
+												<Tooltip
+													content={callActive ? $i18n.t('Call in progress') : $i18n.t('Voice mode')}
+												>
 													<button
 														class=" bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full p-[0.3125rem] self-center"
 														class:call-active={callActive}
@@ -2781,7 +2847,9 @@
 																);
 															}
 														}}
-														aria-label={$i18n.t(callActive ? 'Return to call' : 'Voice mode')}
+														aria-label={callActive
+															? $i18n.t('Return to call')
+															: $i18n.t('Voice mode')}
 													>
 														<Voice className="size-5" strokeWidth="2.5" />
 													</button>

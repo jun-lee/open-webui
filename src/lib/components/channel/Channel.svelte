@@ -377,7 +377,7 @@
 							<Messages
 								{channel}
 								{top}
-								{messages}
+								bind:messages
 								{replyToMessage}
 								onReply={async (message) => {
 									replyToMessage = message;
@@ -410,6 +410,7 @@
 				<div class=" pb-3 px-3">
 					<MessageInput
 						id="root"
+						{messages}
 						bind:chatInputElement
 						bind:replyToMessage
 						{typingUsers}

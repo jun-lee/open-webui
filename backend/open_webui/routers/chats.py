@@ -6,7 +6,12 @@ from uuid import uuid4
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials
-from open_webui.config import ENABLE_ADMIN_CHAT_ACCESS, ENABLE_ADMIN_EXPORT
+from open_webui.config import (
+    CONTEXT_COMPACTION_RETENTION_PERCENTAGE,
+    CONTEXT_COMPACTION_TOKEN_THRESHOLD,
+    ENABLE_ADMIN_CHAT_ACCESS,
+    ENABLE_ADMIN_EXPORT,
+)
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.events import EVENTS, publish_event
 from open_webui.internal.db import get_async_session
@@ -57,6 +62,10 @@ CHAT_CONFIG_KEYS = {
     'CONTEXT_COMPACTION_RETENTION_PERCENTAGE': 'chat.context_compaction.retention_percentage',
     'CONTEXT_COMPACTION_PROMPT_TEMPLATE': 'chat.context_compaction.prompt_template',
     'ENABLE_TOOL_PERMISSIONS': 'chat.tool_permissions.enable',
+    'ENABLE_TOOL_SEARCH': 'chat.tool_search.enable',
+    'TOOL_SEARCH_DEFER_THRESHOLD': 'chat.tool_search.defer_threshold',
+    'TOOL_SEARCH_ALWAYS_LOADED': 'chat.tool_search.always_loaded',
+    'TOOL_SEARCH_DEFER_BUILTIN_TOOLS': 'chat.tool_search.defer_builtin_tools',
 }
 
 
@@ -192,11 +201,15 @@ async def get_folder_unread_counts(user_id: str, db: AsyncSession | None = None)
 class ChatConfigForm(BaseModel):
     CONTEXT_COMPACTION_MODEL: str | None = ''
     ENABLE_CONTEXT_COMPACTION: bool
-    CONTEXT_COMPACTION_TOKEN_THRESHOLD: int
+    CONTEXT_COMPACTION_TOKEN_THRESHOLD: int | None = None
     CONTEXT_COMPACTION_TOKEN_CAP: int | None = None
-    CONTEXT_COMPACTION_RETENTION_PERCENTAGE: int = 40
+    CONTEXT_COMPACTION_RETENTION_PERCENTAGE: int | None = None
     CONTEXT_COMPACTION_PROMPT_TEMPLATE: str
     ENABLE_TOOL_PERMISSIONS: bool = False
+    ENABLE_TOOL_SEARCH: bool = False
+    TOOL_SEARCH_DEFER_THRESHOLD: int = 400
+    TOOL_SEARCH_ALWAYS_LOADED: list[str] = []
+    TOOL_SEARCH_DEFER_BUILTIN_TOOLS: bool = True
 
 
 class CompactChatForm(BaseModel):
@@ -828,6 +841,8 @@ async def create_new_chat(
             data={'title': chat.title, 'folder_id': chat.folder_id},
         )
         return ChatResponse.model_validate(chat, from_attributes=True)
+    except HTTPException:
+        raise
     except Exception as e:
         log.exception(e)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT())
@@ -857,6 +872,8 @@ async def import_chats(
             data={'count': len(chats), 'chat_ids': [chat.id for chat in chats]},
         )
         return chats
+    except HTTPException:
+        raise
     except Exception as e:
         log.exception(e)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT())
@@ -874,9 +891,17 @@ async def get_chat_config(user=Depends(get_admin_user)):
 
 @router.post('/config', response_model=ChatConfigForm)
 async def set_chat_config(form_data: ChatConfigForm, user=Depends(get_admin_user)):
-    threshold = max(1, int(form_data.CONTEXT_COMPACTION_TOKEN_THRESHOLD))
+    threshold = form_data.CONTEXT_COMPACTION_TOKEN_THRESHOLD
+    if threshold is None:
+        threshold = CONTEXT_COMPACTION_TOKEN_THRESHOLD
+    threshold = max(1, int(threshold))
     token_cap = max(1, int(form_data.CONTEXT_COMPACTION_TOKEN_CAP or threshold))
-    retention_percentage = min(50, max(10, int(form_data.CONTEXT_COMPACTION_RETENTION_PERCENTAGE)))
+    retention_percentage = form_data.CONTEXT_COMPACTION_RETENTION_PERCENTAGE
+    if retention_percentage is None:
+        retention_percentage = CONTEXT_COMPACTION_RETENTION_PERCENTAGE
+    retention_percentage = min(50, max(10, int(retention_percentage)))
+    tool_search_defer_threshold = max(0, int(form_data.TOOL_SEARCH_DEFER_THRESHOLD))
+    tool_search_always_loaded = [item.strip() for item in form_data.TOOL_SEARCH_ALWAYS_LOADED if item.strip()]
     await Config.upsert(
         chat_config_updates(
             {
@@ -885,6 +910,8 @@ async def set_chat_config(form_data: ChatConfigForm, user=Depends(get_admin_user
                 'CONTEXT_COMPACTION_TOKEN_THRESHOLD': threshold,
                 'CONTEXT_COMPACTION_TOKEN_CAP': token_cap,
                 'CONTEXT_COMPACTION_RETENTION_PERCENTAGE': retention_percentage,
+                'TOOL_SEARCH_DEFER_THRESHOLD': tool_search_defer_threshold,
+                'TOOL_SEARCH_ALWAYS_LOADED': tool_search_always_loaded,
             }
         )
     )
@@ -1743,18 +1770,24 @@ async def fork_chat_by_id(
 ):
     await require_chat_import_permission(request, user, db)
 
-    chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
+    chat = await Chats.get_accessible_chat_by_id(id, user, db=db)
     if not chat:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.DEFAULT())
+        chat = ChatResponse.model_validate(await get_shared_chat_by_id(id, user=user, db=db))
 
-    if await has_active_tasks(request.app.state.redis, id):
+    is_snapshot = chat.id == chat.share_id
+    is_owner = chat.user_id == user.id
+
+    if not is_snapshot and await has_active_tasks(request.app.state.redis, chat.id):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail='Wait for the current response to finish before forking.',
         )
 
     history = (chat.chat or {}).get('history') or {}
-    messages_map = await Chats.get_messages_map_by_chat_id(id) or history.get('messages') or {}
+    # A share token grants access to its snapshot, not later messages in the original chat.
+    messages_map = history.get('messages') or {}
+    if not is_snapshot:
+        messages_map = await Chats.get_messages_map_by_chat_id(chat.id) or messages_map
 
     source_message_id = (
         (form_data.message_id if form_data else None) or chat.current_message_id or history.get('currentId')
@@ -1792,6 +1825,7 @@ async def fork_chat_by_id(
 
     updated_chat = {**(chat.chat or {})}
     updated_chat.pop('currentId', None)
+    updated_chat.pop('share_mode', None)
     updated_chat.update(
         {
             'originalChatId': chat.id,
@@ -1801,14 +1835,16 @@ async def fork_chat_by_id(
             'messages': fork_messages,
         }
     )
+    if not is_owner:
+        updated_chat = (await shared_chat_response(chat.model_copy(update={'chat': updated_chat}), user, db=db))['chat']
     meta = {
-        **(chat.meta or {}),
+        **((chat.meta or {}) if is_owner else {}),
         'forked_from': chat.id,
         'forked_from_message_id': source_message_id,
     }
 
     # The source chat's folder may no longer be writable by the caller.
-    folder_id = chat.folder_id
+    folder_id = chat.folder_id if is_owner else None
     if folder_id is not None and not await has_folder_write_access(user.id, folder_id, db=db):
         folder_id = None
 
@@ -1820,13 +1856,13 @@ async def fork_chat_by_id(
         internal_meta=meta,
     )
 
-    if fork and chat.variables:
+    if fork and is_owner and chat.variables:
         fork = await Chats.update_chat_variables_by_id(fork.id, chat.variables, db=db, touch=False) or fork
 
     if not fork:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=ERROR_MESSAGES.DEFAULT())
 
-    if chat.pinned:
+    if is_owner and chat.pinned:
         fork = await Chats.toggle_chat_pinned_by_id(fork.id, db=db) or fork
 
     await publish_event(
@@ -1990,8 +2026,6 @@ async def archive_chat_by_id(
         if chat.archived:
             # Cancel any in-flight LLM tasks before archiving
             await stop_item_tasks(request.app.state.redis, id)
-            # Archived chats are excluded from count — clean up orphans
-            await Chats.delete_orphan_tags_for_user(tag_ids, user.id, db=db)
         else:
             # Unarchived — ensure tag rows exist
             await Tags.ensure_tags_exist(tag_ids, user.id, db=db)

@@ -1,4 +1,6 @@
 <script lang="ts">
+	import WorkspaceAccessModal from './common/WorkspaceAccessModal.svelte';
+	let accessModal: WorkspaceAccessModal;
 	import dayjs from 'dayjs';
 	import relativeTime from 'dayjs/plugin/relativeTime';
 	dayjs.extend(relativeTime);
@@ -296,6 +298,8 @@
 	});
 </script>
 
+<WorkspaceAccessModal bind:this={accessModal} resourceType="knowledge" onUpdated={init} />
+
 <svelte:head>
 	<!-- LICENSE covers this Open WebUI browser-title identifier.
 	Do not alter, remove, obscure, or replace it except as LICENSE permits:
@@ -477,11 +481,17 @@
 													<Badge type="muted" content={$i18n.t('Read Only')} />
 												{/if}
 
-												<Tooltip content={dayjs(item.updated_at * 1000).format('LLLL')}>
+												<Tooltip
+													content={dayjs(item.updated_at * 1000)
+														.locale($i18n.language)
+														.format('LLLL')}
+												>
 													<div
 														class="shrink-0 truncate text-[0.6875rem] leading-5 text-gray-400 dark:text-gray-600"
 													>
-														{dayjs(item.updated_at * 1000).fromNow()}
+														{dayjs(item.updated_at * 1000)
+															.locale($i18n.language)
+															.fromNow()}
 													</div>
 												</Tooltip>
 											</div>
@@ -518,6 +528,7 @@
 								{#if item?.write_access || $user?.role === 'admin'}
 									<div class="ml-2 flex shrink-0 flex-row items-center self-center">
 										<ItemMenu
+											accessHandler={() => accessModal.open(item.id)}
 											onExport={$user?.role === 'admin'
 												? () => {
 														exportHandler(item);

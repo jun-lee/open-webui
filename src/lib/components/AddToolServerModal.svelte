@@ -80,10 +80,9 @@
 	const selectClass =
 		'bg-transparent pr-5 outline-hidden placeholder:text-gray-300 dark:placeholder:text-gray-700';
 	const oauthAuthTypes = ['oauth_2.1', 'oauth_2.1_static'];
-	const verifyLabel = () =>
-		oauthAuthTypes.includes(auth_type)
-			? $i18n.t('Check OAuth Discovery')
-			: $i18n.t('Verify Connection');
+	$: verifyLabel = oauthAuthTypes.includes(auth_type)
+		? $i18n.t('Check OAuth Discovery')
+		: $i18n.t('Verify Connection');
 	const verifySuccessMessage = () =>
 		oauthAuthTypes.includes(auth_type)
 			? $i18n.t('OAuth discovery successful')
@@ -686,13 +685,13 @@
 										required
 									/>
 
-									<Tooltip content={verifyLabel()} className="shrink-0 flex items-center mr-1">
+									<Tooltip content={verifyLabel} className="shrink-0 flex items-center mr-1">
 										<button
 											class="self-center p-1 bg-transparent hover:bg-gray-100 dark:hover:bg-gray-850 rounded-lg transition"
 											on:click={() => {
 												verifyHandler();
 											}}
-											aria-label={verifyLabel()}
+											aria-label={verifyLabel}
 											type="button"
 										>
 											<svg
@@ -1105,9 +1104,7 @@
 						</div>
 
 						<button
-							class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full flex items-center gap-2 whitespace-nowrap {loading
-								? ' cursor-not-allowed'
-								: ''}"
+							class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white disabled:cursor-not-allowed"
 							type="submit"
 							disabled={loading}
 						>
@@ -1115,7 +1112,7 @@
 
 							{#if loading}
 								<span class="shrink-0">
-									<Spinner />
+									<Spinner className="size-3" />
 								</span>
 							{/if}
 						</button>

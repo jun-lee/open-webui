@@ -150,6 +150,7 @@ from open_webui.models.models import Models, normalize_model_tags
 from open_webui.models.groups import Groups, resolve_group_default_models
 from open_webui.models.users import Users
 from open_webui.routers import (
+    apps,
     analytics,
     audio,
     auths,
@@ -253,6 +254,7 @@ from open_webui.utils.middleware import (
     build_chat_response_context,
     process_chat_payload,
     process_chat_response,
+    publish_chat_failed_event,
 )
 from open_webui.utils.misc import get_response_error_detail, merge_model_params
 from open_webui.utils.model_ids import strip_provider_model_prefix
@@ -317,6 +319,15 @@ class SPAStaticFiles(StaticFiles):
                     return await super().get_response('index.html', scope)
             else:
                 raise ex
+
+    def file_response(
+        self, full_path: str, stat_result: os.stat_result, scope: dict, status_code: int = 200
+    ) -> Response:
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        if full_path.endswith('.html'):
+            # Stale cached HTML references chunks from an older build
+            response.headers['Cache-Control'] = 'no-cache'
+        return response
 
 
 class CORSStaticFiles(StaticFiles):
@@ -400,6 +411,9 @@ async def lifespan(app: FastAPI):
     await install_tool_and_function_dependencies()
 
     app.state.redis = get_redis_client(async_mode=True)
+    from open_webui.socket.apps import connections as app_connections
+
+    await app_connections.start(app.state.redis)
 
     if app.state.redis is not None:
         app.state.redis_task_command_listener = asyncio.create_task(redis_task_command_listener(app))
@@ -492,6 +506,7 @@ async def lifespan(app: FastAPI):
     yield
 
     await publish_event(app, EVENTS.SYSTEM_SHUTDOWN_STARTED, source='system')
+    await app_connections.close()
 
     # Shutdown: clean up shared resources
     from open_webui.utils.session_pool import close_session
@@ -875,6 +890,7 @@ app.include_router(mfa.router, prefix='/api/v1/auths/mfa', tags=['auths'])
 app.include_router(users.router, prefix='/api/v1/users', tags=['users'])
 
 
+app.include_router(apps.router, prefix='/api/v1/apps', tags=['apps'])
 app.include_router(channels.router, prefix='/api/v1/channels', tags=['channels'])
 app.include_router(chats.router, prefix='/api/v1/chats', tags=['chats'])
 app.include_router(notes.router, prefix='/api/v1/notes', tags=['notes'])
@@ -1136,6 +1152,7 @@ async def chat_completion(
         await get_all_models(request, user=user)
 
     model_id = form_data.get('model', None)
+    request.state.model_id = model_id
     model_item = form_data.pop('model_item', {})
     tasks = form_data.pop('background_tasks', None)
 
@@ -1202,7 +1219,8 @@ async def chat_completion(
             permissions = await Config.get('user.permissions')
             for permission in ('chat.controls', 'chat.params'):
                 if not await has_permission(user.id, permission, permissions):
-                    raise HTTPException(403, 'You cannot change model parameters.')
+                    model_controls = {}
+                    break
         if missing_base_model and model_controls.get(model_id):
             raise HTTPException(400, 'Model control options cannot be applied to the fallback model.')
         if model_info_params or request_params:
@@ -1297,7 +1315,11 @@ async def chat_completion(
             or 'full'
         )
 
+        approval_resume = getattr(request.state, 'tool_approval_resume', None)
         metadata = {
+            'tool_approval_resume': approval_resume[2]
+            if approval_resume and approval_resume[:2] == (chat_id, form_data.get('assistant_message_id'))
+            else None,
             'user_id': user.id,
             'user_agent': request.headers.get('user-agent', '') or '',
             'internal': getattr(request.state, 'internal', False) is True,
@@ -1315,6 +1337,15 @@ async def chat_completion(
             'features': form_data.get('features', {}),
             'variables': form_data.get('variables', {}),
             'chat_variables': chat_variables,
+            # Later requests rebuild generated instructions from this original chat context.
+            'chat_context': {
+                **copy.deepcopy(getattr(request.state, 'chat_context', None) or {}),
+                'messages': copy.deepcopy(
+                    [message for message in form_data.get('messages', []) if message.get('role') == 'system']
+                ),
+                'params': {'system': request_params['system']} if 'system' in request_params else {},
+                'chat_variables': copy.deepcopy(chat_variables),
+            },
             'model': model,
             'direct': model_item.get('direct', False),
             'params': {
@@ -1551,9 +1582,10 @@ async def chat_completion(
                             for mid, message in turn['messages'].items()
                         }
                         await event_emitter({'type': 'chat:messages', 'data': turn})
-                        await emit_chat_list_event({**metadata, 'message_id': user_message['id']}, chat_id)
+                        user_message_id = user_message.get('id')
+                        await emit_chat_list_event({**metadata, 'message_id': user_message_id}, chat_id)
                         for message_id, message in turn['messages'].items():
-                            if message_id != user_message['id'] and message.get('parentId') != user_message['id']:
+                            if message_id != user_message_id and message.get('parentId') != user_message_id:
                                 continue
                             await publish_event(
                                 request,
@@ -1562,7 +1594,10 @@ async def chat_completion(
                                 subject_id=message_id,
                                 data={'chat_id': chat_id, 'role': message['role'], 'model': message.get('model')},
                             )
-                        if not getattr(request.state, 'internal', False):
+                        if user_message_id and not (
+                            getattr(request.state, 'internal', False)
+                            or (user_message.get('meta') or {}).get('internal')
+                        ):
                             try:
                                 from open_webui.utils.timers import cancel_timers_for_chat
 
@@ -1693,6 +1728,11 @@ async def chat_completion(
                                 )
                         except Exception:
                             log.exception('Failed to emit chat error')
+
+                        try:
+                            await publish_chat_failed_event(request, user, metadata, str(error_detail))
+                        except Exception:
+                            log.exception('Failed to publish chat failed event')
         finally:
             # Clean up MCP clients.  Each client is isolated so one
             # failure doesn't skip the rest.
@@ -1762,7 +1802,7 @@ async def chat_completion(
                             'session_id': metadata.get('session_id'),
                             'tool_ids': metadata.get('tool_ids') or [],
                             'skill_ids': metadata.get('skill_ids') or [],
-                            'system_prompt': metadata.get('system_prompt'),
+                            'chat_context': metadata.get('chat_context'),
                             'filter_ids': metadata.get('filter_ids') or [],
                             'terminal_id': metadata.get('terminal_id'),
                             'features': metadata.get('features') or {},
@@ -1774,7 +1814,7 @@ async def chat_completion(
 
     # Fan out: one task per model
     if metadata.get('session_id') and metadata.get('chat_id'):
-        task_ids = []
+        chat_tasks = {}
         subagent_results = []
         is_internal = getattr(request.state, 'internal', False) is True
         chat_id = metadata['chat_id']
@@ -1791,6 +1831,7 @@ async def chat_completion(
             # Per-model metadata: own message_id + model
             per_model_metadata = {
                 **metadata,
+                'chat_context': copy.deepcopy(metadata['chat_context']),
                 'message_id': assistant_message_id,
                 'task_id': str(uuid4()),
             }
@@ -1829,13 +1870,13 @@ async def chat_completion(
                 subagent_results.append(await process)
                 continue
 
-            task_id, _ = await create_task(
+            task_id, task = await create_task(
                 request.app.state.redis,
                 process,
                 id=chat_id,
                 task_id=per_model_metadata['task_id'],
             )
-            task_ids.append(task_id)
+            chat_tasks[task_id] = task
 
         if is_internal:
             return {
@@ -1846,7 +1887,7 @@ async def chat_completion(
             }
 
         # Emit chat:active=true
-        if task_ids:
+        if chat_tasks:
             event_emitter = await get_event_emitter(
                 {**metadata, 'message_id': message_ids[0]['message_id']},
                 update_db=False,
@@ -1855,9 +1896,13 @@ async def chat_completion(
                 folder_id = metadata.get('folder_id') or await Chats.get_chat_folder_id(chat_id, user.id)
                 await event_emitter({'type': 'chat:active', 'data': {'active': True, 'folder_id': folder_id}})
 
+        # Automation chat runs must finish before their caller records success.
+        if metadata.get('automation_id') and is_saved_chat_id(chat_id):
+            await asyncio.gather(*chat_tasks.values())
+
         return {
             'status': True,
-            'task_ids': task_ids,
+            'task_ids': list(chat_tasks),
             'chat_id': chat_id,
         }
     else:
@@ -1886,8 +1931,14 @@ async def resolve_chat_message_tool_call(
     db: AsyncSession = Depends(get_async_session),
 ):
     resolution = await resolve_tool_call_output(id, message_id, form_data, user, db=db)
-    payload = await build_tool_approval_resume_payload(id, message_id, chat=resolution['chat'])
-    result = await chat_completion(request, payload, user)
+    if resolution['resume'] is None:
+        return {'status': True, 'chat_id': id, 'message_id': message_id, 'task_ids': []}
+    request.state.tool_approval_resume = (id, message_id, resolution['resume'])
+    try:
+        payload = await build_tool_approval_resume_payload(id, message_id, chat=resolution['chat'])
+        result = await chat_completion(request, payload, user)
+    finally:
+        del request.state.tool_approval_resume
     return {
         'status': True,
         'chat_id': id,
@@ -2009,6 +2060,7 @@ async def generate_messages(
     Anthropic's x-api-key header (via middleware translation).
     """
     requested_model = form_data.get('model', '')
+    request.state.model_id = requested_model
     input_tokens = None
     try:
         input_tokens = await openai.count_anthropic_tokens(request, form_data, user)
@@ -2286,6 +2338,7 @@ async def get_app_config(request: Request):
         'folders.enable',
         'folders.max_file_count',
         'channels.enable',
+        'apps.enable',
         'calendar.enable',
         'automations.enable',
         'notes.enable',
@@ -2381,6 +2434,7 @@ async def get_app_config(request: Request):
                     'enable_folders': config.get('folders.enable'),
                     'folder_max_file_count': config.get('folders.max_file_count'),
                     'enable_channels': config.get('channels.enable'),
+                    'enable_apps': config.get('apps.enable'),
                     'enable_calendar': config.get('calendar.enable'),
                     'enable_automations': config.get('automations.enable'),
                     'enable_notes': config.get('notes.enable'),

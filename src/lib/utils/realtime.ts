@@ -1,3 +1,4 @@
+import { v4 as uuidv4 } from 'uuid';
 import { AUDIO_API_BASE_URL } from '$lib/constants';
 
 export type BridgeSubmission = {
@@ -95,7 +96,7 @@ export class RealtimeCall {
 	private configuration = '';
 	private chatContext = '';
 	private cancelRequested = false;
-	private receivingSpeech = false;
+	private receivingSpeech = '';
 	private savingHistory = 0;
 	private lastPong = 0;
 	private activeResponse = '';
@@ -122,7 +123,7 @@ export class RealtimeCall {
 		this.connecting = true;
 		this.options.change();
 		const session = ++this.session;
-		this.callId = crypto.randomUUID();
+		this.callId = uuidv4();
 		try {
 			const context = this.options.context();
 			this.token = token;
@@ -223,9 +224,6 @@ export class RealtimeCall {
 				this.options.change();
 			}
 			this.flush();
-		} else if (data.type === 'overflow') {
-			this.stopSpeaking();
-			this.fail('Voice playback exceeded the 120 second buffer.');
 		} else if (data.type === 'cleared') {
 			const responses = this.clears.get(data.id);
 			this.clears.delete(data.id);
@@ -352,22 +350,33 @@ export class RealtimeCall {
 			this.syncContext();
 			this.audio?.port.postMessage({ type: 'capture', enabled: !this.muted });
 		} else if (type === 'input_audio_buffer.speech_started') {
-			this.receivingSpeech = true;
+			if (this.muted) return;
+			this.receivingSpeech = event.item_id;
 			this.userSpeaking = !this.muted;
-			this.stopSpeaking();
+			// VAD is provisional: retain the audio so a noise-only turn can resume it.
+			this.audio?.port.postMessage({ type: 'pause', paused: true });
 		} else if (type === 'input_audio_buffer.speech_stopped') {
-			this.userSpeaking = false;
-		} else if (type === 'conversation.item.input_audio_transcription.failed') {
-			this.receivingSpeech = false;
-			this.userSpeaking = false;
-			this.enqueue({ type: 'bridge.status', status: 'transcription_failed' });
-		} else if (type === 'conversation.item.input_audio_transcription.completed') {
-			this.receivingSpeech = false;
-			this.userSpeaking = false;
+			if (this.receivingSpeech === event.item_id) this.userSpeaking = false;
+		} else if (
+			type === 'conversation.item.input_audio_transcription.failed' ||
+			type === 'conversation.item.input_audio_transcription.completed'
+		) {
+			// Transcription events from older segments can arrive during newer speech.
+			if (this.receivingSpeech === event.item_id) {
+				this.receivingSpeech = '';
+				this.userSpeaking = false;
+			}
 			if (this.inputs.has(event.item_id)) return;
-			const text = event.transcript?.trim();
+			const failed = type === 'conversation.item.input_audio_transcription.failed';
+			const text = failed ? '' : event.transcript?.trim();
+			if (text) this.stopSpeaking();
+			if (!this.receivingSpeech) this.audio?.port.postMessage({ type: 'pause', paused: false });
 			if (!text) {
-				this.enqueue({ type: 'bridge.status', status: 'transcription_failed' });
+				// Empty VAD segments are not requests and must not produce assistant replies.
+				if (failed)
+					this.options.error('A voice segment could not be transcribed. Please try again.');
+				this.options.change();
+				this.flush();
 				return;
 			}
 			const session = this.session;
@@ -448,8 +457,7 @@ export class RealtimeCall {
 				if (this.animationCalls.has(event.item.call_id)) return;
 				this.animationCalls.add(event.item.call_id);
 				let status = 'unavailable';
-				if (!response || this.interrupted.has(event.response_id) || this.receivingSpeech)
-					status = 'cancelled';
+				if (!response || this.interrupted.has(event.response_id)) status = 'cancelled';
 				else {
 					try {
 						const args = JSON.parse(event.item.arguments);
@@ -708,12 +716,17 @@ export class RealtimeCall {
 		if (this.muted) {
 			this.inputLevel = 0;
 			this.userSpeaking = false;
+			this.receivingSpeech = '';
+			this.audio?.port.postMessage({ type: 'pause', paused: false });
 		}
 		this.stream?.getAudioTracks().forEach((track) => {
 			track.enabled = !this.muted;
 		});
 		this.audio?.port.postMessage({ type: 'capture', enabled: this.connected && !this.muted });
-		if (this.muted) this.send({ type: 'input_audio_buffer.clear' });
+		if (this.muted) {
+			this.send({ type: 'input_audio_buffer.clear' });
+			this.flush();
+		}
 		this.options.change();
 	}
 
@@ -754,7 +767,7 @@ export class RealtimeCall {
 		this.playbackActive = false;
 		this.responseRequested = false;
 		this.cancelRequested = false;
-		this.receivingSpeech = false;
+		this.receivingSpeech = '';
 		this.userSpeaking = false;
 		this.activeResponse = '';
 		this.pending = undefined;
