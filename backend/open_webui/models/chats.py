@@ -421,7 +421,7 @@ class ChatTable:
                     {
                         ChatMessages.DB_TO_JSON_KEY_MAP.get(column.key, column.key): getattr(row, column.key)
                         for column in ChatMessage.__table__.columns
-                        if column.key not in ChatMessages.EXCLUDED_COLUMNS
+                        if column.key not in ChatMessages.EXCLUDED_COLUMNS and getattr(row, column.key) is not None
                     }
                 )
                 message['id'] = message_id
@@ -791,7 +791,7 @@ class ChatTable:
                                 user_id=message.get('user_id')
                                 or (message['user'].get('id') if isinstance(message.get('user'), dict) else None)
                                 or user_id,
-                                data=message,
+                                data={**message, 'timestamp': message.get('timestamp')},
                             )
                         except Exception as e:
                             log.warning(
@@ -851,6 +851,18 @@ class ChatTable:
                 return ChatModel.model_validate(chat_item)
         except Exception:
             return
+
+    async def update_chat_params_by_id(self, id: str, params: dict) -> ChatModel | None:
+        async with self._chat_transaction(id) as (_, chat):
+            if chat is None:
+                return None
+
+            stored = chat.chat or {}
+            chat.chat = {
+                **stored,
+                'params': self._clean_null_bytes({**(stored.get('params') or {}), **params}),
+            }
+            return ChatModel.model_validate(chat)
 
     async def update_chat_variables_by_id(
         self,
@@ -1075,18 +1087,22 @@ class ChatTable:
 
         if message_id in messages:
             # Voice updates must not replace approval-resume metadata, and approval
-            # pauses must retain the generated speech already attached to this turn.
+            # pauses must retain speech and response timing already attached to this turn.
             existing_meta = messages[message_id].get('meta')
             existing_meta = existing_meta if isinstance(existing_meta, dict) else {}
             incoming_meta = message.get('meta')
             if isinstance(incoming_meta, dict):
-                if set(incoming_meta) <= {'voice', 'task_id'}:
+                if set(incoming_meta) <= {'voice', 'task_id', 'response_started_at', 'response_ended_at'}:
                     message = {**message, 'meta': {**existing_meta, **incoming_meta}}
                 else:
                     message = {
                         **message,
                         'meta': {
-                            **{key: existing_meta[key] for key in ('voice', 'task_id') if key in existing_meta},
+                            **{
+                                key: existing_meta[key]
+                                for key in ('voice', 'task_id', 'response_started_at', 'response_ended_at')
+                                if key in existing_meta
+                            },
                             **incoming_meta,
                         },
                     }
@@ -1270,10 +1286,8 @@ class ChatTable:
             parent_id = None
             if user_message:
                 existing = messages.get(user_message_id)
-                if existing and (
-                    existing.get('role') != 'user' or (existing.get('user_id') or chat.user_id) != user.id
-                ):
-                    raise HTTPException(403, 'You can only regenerate your own messages.')
+                if existing and existing.get('role') != 'user':
+                    raise HTTPException(403, 'You can only regenerate replies to user messages.')
                 parent_id = existing.get('parentId') if existing else user_message.get('parentId')
                 if parent_id is not None and parent_id not in messages:
                     raise HTTPException(409, 'Parent message no longer exists.')
@@ -1292,7 +1306,7 @@ class ChatTable:
                         user_id=user.id,
                         user={'id': user.id, 'name': user.name},
                     )
-                elif 'models' in user_message:
+                elif 'models' in user_message and (existing.get('user_id') or chat.user_id) == user.id:
                     message = {**existing, 'models': user_message['models']}
                 turn[user_message_id] = self.upsert_message_to_history(
                     history, user_message_id, self._clean_null_bytes(message)
@@ -1320,7 +1334,7 @@ class ChatTable:
             chat.current_message_id = history['currentId']
             chat.updated_at = int(time.time())
             for mid, message in turn.items():
-                await ChatMessages.upsert_message(mid, chat_id, user.id, message, db=db)
+                await ChatMessages.upsert_message(mid, chat_id, message.get('user_id') or chat.user_id, message, db=db)
             if parent_id:
                 turn[parent_id] = history['messages'][parent_id]
             return {'messages': turn, 'currentId': history['currentId']}
@@ -1567,7 +1581,7 @@ class ChatTable:
     async def archive_all_chats_by_user_id(self, user_id: str, db: AsyncSession | None = None) -> bool:
         try:
             async with get_async_db_context(db) as session:
-                await session.execute(update(Chat).filter_by(user_id=user_id).values(archived=True))
+                await session.execute(update(Chat).filter_by(user_id=user_id).values(archived=True, folder_id=None))
                 await session.commit()
                 return True
         except Exception:
@@ -1783,6 +1797,13 @@ class ChatTable:
             result = await session.execute(stmt)
             return [meta for meta in result.scalars().all() if isinstance(meta, dict)]
 
+    async def get_owner_ids_by_chat_ids(self, chat_ids: list[str], db: AsyncSession | None = None) -> dict[str, str]:
+        if not chat_ids:
+            return {}
+        async with get_async_db_context(db) as session:
+            result = await session.execute(select(Chat.id, Chat.user_id).filter(Chat.id.in_(chat_ids)))
+            return dict(result.all())
+
     async def get_chats_by_model_id(
         self,
         model_id: str,
@@ -1803,6 +1824,11 @@ class ChatTable:
                     chat_ids = chat_ids.filter(ChatMessage.created_at >= filter.get('start_date'))
                 if filter.get('end_date'):
                     chat_ids = chat_ids.filter(ChatMessage.created_at <= filter.get('end_date'))
+                if filter.get('group_id'):
+                    from open_webui.models.groups import group_user_memberships
+
+                    group_users = select(group_user_memberships([filter['group_id']], True).c.user_id).scalar_subquery()
+                    chat_ids = chat_ids.filter(ChatMessage.user_id.in_(group_users))
 
             chat_ids = chat_ids.subquery()
 
@@ -2521,7 +2547,8 @@ class ChatTable:
                 chat = await session.get(Chat, id)
                 chat.folder_id = folder_id
                 chat.updated_at = int(time.time())
-                chat.last_read_at = int(time.time())
+                if chat.user_id == user_id:
+                    chat.last_read_at = int(time.time())
                 chat.pinned = False
                 if folder_id is not None:
                     # Folder listings only show unarchived chats, so moving an archived
