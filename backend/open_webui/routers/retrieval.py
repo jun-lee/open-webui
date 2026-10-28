@@ -37,11 +37,8 @@ from langchain_text_splitters import (
 from open_webui.config import (
     Config,
     DEFAULT_LOCALE,
-    ENV,
-    RAG_EMBEDDING_CONTENT_PREFIX,
     RAG_EMBEDDING_MODEL_AUTO_UPDATE,
     RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
-    RAG_EMBEDDING_QUERY_PREFIX,
     RAG_RERANKING_MODEL_AUTO_UPDATE,
     RAG_RERANKING_MODEL_TRUST_REMOTE_CODE,
     UPLOAD_DIR,
@@ -96,7 +93,7 @@ from open_webui.retrieval.web.firecrawl import search_firecrawl
 from open_webui.retrieval.web.google_pse import search_google_pse
 from open_webui.retrieval.web.jina_search import search_jina
 from open_webui.retrieval.web.kagi import search_kagi
-from open_webui.retrieval.web.utils import get_ssrf_safe_session, validate_url
+from open_webui.retrieval.web.utils import assert_identity_encoding, get_ssrf_safe_session, validate_url
 
 # Web search engines
 from open_webui.retrieval.web.main import SearchResult
@@ -348,6 +345,8 @@ RETRIEVAL_CONFIG_KEYS = {
     'RAG_EMBEDDING_BATCH_SIZE': 'rag.embedding_batch_size',
     'RAG_EMBEDDING_CONCURRENT_REQUESTS': 'rag.embedding_concurrent_requests',
     'RAG_EMBEDDING_ENGINE': 'rag.embedding_engine',
+    'RAG_EMBEDDING_QUERY_PREFIX': 'rag.embedding_query_prefix',
+    'RAG_EMBEDDING_CONTENT_PREFIX': 'rag.embedding_content_prefix',
     'RAG_EMBEDDING_MODEL': 'rag.embedding_model',
     'RAG_TOKENIZER_MODEL': 'rag.tokenizer_model',
     'RAG_EXTERNAL_RERANKER_API_KEY': 'rag.external_reranker_api_key',
@@ -444,6 +443,8 @@ async def get_embedding_config(request: Request, user=Depends(get_admin_user)):
     return {
         'status': True,
         'RAG_EMBEDDING_ENGINE': config['rag.embedding_engine'],
+        'RAG_EMBEDDING_QUERY_PREFIX': config['rag.embedding_query_prefix'],
+        'RAG_EMBEDDING_CONTENT_PREFIX': config['rag.embedding_content_prefix'],
         'RAG_EMBEDDING_MODEL': config['rag.embedding_model'],
         'RAG_EMBEDDING_BATCH_SIZE': config['rag.embedding_batch_size'],
         'ENABLE_ASYNC_EMBEDDING': config['rag.enable_async_embedding'],
@@ -485,6 +486,8 @@ class EmbeddingModelUpdateForm(BaseModel):
     ollama_config: OllamaConfigForm | None = None
     azure_openai_config: AzureOpenAIConfigForm | None = None
     RAG_EMBEDDING_ENGINE: str
+    RAG_EMBEDDING_QUERY_PREFIX: str | None = None
+    RAG_EMBEDDING_CONTENT_PREFIX: str | None = None
     RAG_EMBEDDING_MODEL: str
     RAG_EMBEDDING_BATCH_SIZE: int | None = 1
     ENABLE_ASYNC_EMBEDDING: bool | None = True
@@ -522,6 +525,10 @@ async def update_embedding_config(request: Request, form_data: EmbeddingModelUpd
             'rag.enable_async_embedding': form_data.ENABLE_ASYNC_EMBEDDING,
             'rag.embedding_concurrent_requests': form_data.RAG_EMBEDDING_CONCURRENT_REQUESTS,
         }
+        if 'RAG_EMBEDDING_QUERY_PREFIX' in form_data.model_fields_set:
+            updates['rag.embedding_query_prefix'] = form_data.RAG_EMBEDDING_QUERY_PREFIX or None
+        if 'RAG_EMBEDDING_CONTENT_PREFIX' in form_data.model_fields_set:
+            updates['rag.embedding_content_prefix'] = form_data.RAG_EMBEDDING_CONTENT_PREFIX or None
         if form_data.RAG_EMBEDDING_ENGINE == 'openai' and form_data.openai_config is not None:
             updates['rag.openai.api_base_url'] = form_data.openai_config.url or ''
             updates['rag.openai.api_key'] = form_data.openai_config.key or ''
@@ -573,6 +580,8 @@ async def update_embedding_config(request: Request, form_data: EmbeddingModelUpd
         return {
             'status': True,
             'RAG_EMBEDDING_ENGINE': config['rag.embedding_engine'],
+            'RAG_EMBEDDING_QUERY_PREFIX': config['rag.embedding_query_prefix'],
+            'RAG_EMBEDDING_CONTENT_PREFIX': config['rag.embedding_content_prefix'],
             'RAG_EMBEDDING_MODEL': config['rag.embedding_model'],
             'RAG_EMBEDDING_BATCH_SIZE': config['rag.embedding_batch_size'],
             'ENABLE_ASYNC_EMBEDDING': config['rag.enable_async_embedding'],
@@ -1527,7 +1536,7 @@ def save_docs_to_vector_db(
         future = asyncio.run_coroutine_threadsafe(
             embedding_function(
                 list(map(lambda x: x.replace('\n', ' '), texts)),
-                prefix=RAG_EMBEDDING_CONTENT_PREFIX,
+                prefix=config['rag.embedding_content_prefix'],
                 user=user,
             ),
             request.app.state.main_loop,
@@ -1575,8 +1584,26 @@ async def process_file(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """Standalone processing endpoint: index the file, then mark it completed.
+
+    Uploads call index_file directly so they can finish knowledge linking before
+    reporting completion.
     """
-    Process a file and save its content to the vector database.
+    result = await index_file(request, form_data, user, db)
+    async with get_async_db() as session:
+        await Files.update_file_data_by_id(form_data.file_id, {'status': 'completed', 'error': None}, db=session)
+    return result
+
+
+async def index_file(
+    request: Request,
+    form_data: ProcessFileForm,
+    user,
+    db: AsyncSession,
+):
+    """Extract or reuse file content and index it without marking completion.
+
+    The caller marks completion after all its work, including any knowledge linking.
     Note: granular session management is used to prevent connection pool exhaustion.
     The session is committed before external API calls, and updates use a fresh session.
     """
@@ -1714,7 +1741,6 @@ async def process_file(
             hash = calculate_sha256_string(text_content)
 
             if config['rag.bypass_embedding_and_retrieval']:
-                await Files.update_file_data_by_id(file.id, {'status': 'completed', 'error': None}, db=db)
                 await Files.update_file_hash_by_id(file.id, hash, db=db)
                 await publish_event(
                     request,
@@ -1771,11 +1797,6 @@ async def process_file(
                                 db=session,
                             )
 
-                            await Files.update_file_data_by_id(
-                                file.id,
-                                {'status': 'completed', 'error': None},
-                                db=session,
-                            )
                             await Files.update_file_hash_by_id(file.id, hash, db=session)
 
                             await publish_event(
@@ -1896,13 +1917,14 @@ async def _fetch_url(url: str, max_size_mb: int | str | None) -> dict:
         except (TypeError, ValueError):
             max_bytes = None
 
-    headers = {'User-Agent': USER_AGENT} if USER_AGENT else None
+    headers = {'Accept-Encoding': 'identity'} | ({'User-Agent': USER_AGENT} if USER_AGENT else {})
 
     async with get_ssrf_safe_session() as session:
         async with session.get(
             url, headers=headers, ssl=AIOHTTP_CLIENT_SESSION_SSL, allow_redirects=AIOHTTP_CLIENT_ALLOW_REDIRECTS
         ) as response:
             response.raise_for_status()
+            assert_identity_encoding(response.headers.getall('Content-Encoding', ()))
 
             content_type = response.headers.get('Content-Type', '')
             content_disposition = response.headers.get('Content-Disposition', '')
@@ -2779,7 +2801,7 @@ async def query_doc_handler(
             )
         else:
             query_embedding = await request.app.state.EMBEDDING_FUNCTION(
-                form_data.query, prefix=RAG_EMBEDDING_QUERY_PREFIX, user=user
+                form_data.query, prefix=config['rag.embedding_query_prefix'], user=user
             )
             # query_doc wraps a blocking get_vector_db_client().search call;
             # offload so the request's event loop stays responsive.
@@ -2988,13 +3010,6 @@ async def reset_upload_dir(request: Request, user=Depends(get_admin_user)) -> bo
         subject_type='file.uploads',
     )
     return True
-
-
-if ENV == 'dev':
-
-    @router.get('/ef/{text}')
-    async def get_embeddings(request: Request, text: str | None = 'Hello World!'):
-        return {'result': await request.app.state.EMBEDDING_FUNCTION(text, prefix=RAG_EMBEDDING_QUERY_PREFIX)}
 
 
 class BatchProcessFilesForm(BaseModel):

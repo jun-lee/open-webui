@@ -300,7 +300,7 @@ class KnowledgeTable:
                     elif source == 'local':
                         stmt = stmt.filter(
                             or_(
-                                Knowledge.meta.is_(None),
+                                Knowledge.meta['source'].as_string().is_(None),
                                 Knowledge.meta['source'].as_string() != 'external',
                             )
                         )
@@ -792,8 +792,6 @@ class KnowledgeTable:
                     )
                 )
                 await db.commit()
-                if form_data.access_grants is not None:
-                    await AccessGrants.set_access_grants('knowledge', id, form_data.access_grants, db=db)
                 return await self.get_knowledge_by_id(id=id, db=db)
         except Exception as e:
             log.exception(e)

@@ -257,7 +257,6 @@ async def connect_mcp_server(
             tool_specs = [spec for spec in tool_specs if is_string_allowed(spec['name'], function_name_filter_list)]
         return client, tool_specs
     except BaseException:
-        # MCP sessions must be closed in the same task that opened them.
         await client.disconnect()
         raise
 
@@ -451,6 +450,7 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
                     # Prepend tool ID to function name
                     function_name = f'{tool_id}_{function_name}'
 
+                tool_dict['spec'] = {**tool_dict['spec'], 'name': function_name}
                 tools_dict[function_name] = tool_dict
         else:
             if tool_id.startswith('server:'):
@@ -551,6 +551,7 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
                             # Prepend server ID to function name
                             function_name = f'{server_id}_{function_name}'
 
+                        tool_dict['spec'] = {**tool_dict['spec'], 'name': function_name}
                         tools_dict[function_name] = tool_dict
 
                 else:
@@ -1283,7 +1284,7 @@ def convert_openapi_to_tool_payload(openapi_spec):
                             tool['parameters']['properties'].update(resolved_schema['properties'])
                             if 'required' in resolved_schema:
                                 tool['parameters']['required'] = list(
-                                    set(tool['parameters']['required'] + resolved_schema['required'])
+                                    dict.fromkeys(tool['parameters']['required'] + resolved_schema['required'])
                                 )
                         elif resolved_schema.get('type') == 'array':
                             tool['parameters'] = resolved_schema  # special case for array
@@ -1325,7 +1326,13 @@ async def get_tool_servers(request: Request):
                 data = await request.app.state.redis.get(f'{REDIS_KEY_PREFIX}:tool_servers')
                 if data is not None:
                     tool_servers = JSONCodec.loads(data)
-                    request.app.state.TOOL_SERVERS = tool_servers
+                    if tool_servers or not any(
+                        connection.get('config', {}).get('enable') and connection.get('type', 'openapi') == 'openapi'
+                        for connection in await Config.get('tool_server.connections', []) or []
+                    ):
+                        request.app.state.TOOL_SERVERS = tool_servers
+                    else:
+                        tool_servers = None
             except Exception as e:
                 log.error(f'Error fetching tool_servers from Redis: {e}')
 
@@ -1861,7 +1868,7 @@ async def execute_tool_server(
             final_url = final_url.replace(f'{{{key}}}', quote(str(value), safe=''))
 
         if query_params:
-            final_url = f'{final_url}?{urlencode(query_params)}'
+            final_url = f'{final_url}?{urlencode(query_params, doseq=True)}'
 
         request_body_content = operation.get('requestBody', {}).get('content')
         if request_body_content and params:
